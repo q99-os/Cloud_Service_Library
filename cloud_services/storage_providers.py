@@ -86,7 +86,7 @@ class S3Service(AbstractStorageService):
                 config=Config(region_name=AWS_REGION),
                 **self.s3_default,
             )
-        self.s3_client.get_caller_identity()
+        self.s3_client.list_buckets()
 
     async def files_discovery(
         self,
