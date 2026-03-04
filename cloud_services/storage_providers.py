@@ -4,16 +4,32 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import hashlib
+import json
+import mimetypes
 import os
 import tempfile
-from typing import Any, BinaryIO, Callable, Dict, Iterable, Optional, Type
+from typing import Any, Dict, Iterable, Optional
 
 import boto3
 import botocore
 from botocore.config import Config
 from azure.storage.blob import BlobServiceClient
 
+try:
+    from google.cloud import storage as gcs_storage
+except ImportError:
+    gcs_storage = None
+
 from cloud_services.env_vars import AWS_KEY, AWS_REGION, AWS_SECRET, AWS_URL, CONECTION_STRING
+
+
+@dataclass
+class DiscoveredObject:
+    path: str
+    file_size: int = 0
+    source_modified_at: int = 0
+    content_hash: Optional[str] = None
+    mime_type: Optional[str] = None
 
 
 class AbstractStorageService(ABC):
@@ -51,7 +67,23 @@ class AbstractStorageService(ABC):
         max_file_size_mb: int = 500,
         use_hash: bool = False,
         prefix: str = "",
-    ) -> list[str]:
+    ) -> list[DiscoveredObject]:
+        ...
+
+    @abstractmethod
+    def list_objects_with_delimiter(
+        self,
+        container: str,
+        prefix: str = "",
+        delimiter: str = "/",
+    ) -> Dict[str, Any]:
+        """List objects using a delimiter to discover virtual folder prefixes.
+
+        Returns a dict with:
+            "common_prefixes": list[str]  -- virtual folder prefixes
+            "contents": list[dict]        -- objects at this level, each with
+                                             keys: "key", "size", "last_modified"
+        """
         ...
 
 
@@ -74,12 +106,16 @@ class S3Service(AbstractStorageService):
         any_provided = any(v is not None for v in s3_provided_keys.values())
 
         if any_provided:
-            s3_provided_keys.pop("region")
+            region = s3_provided_keys.pop("region")
+            effective = {**self.s3_default}
+            for k, v in s3_provided_keys.items():
+                if v is not None:
+                    effective[k] = v
             self.s3_client = boto3.client(
-            "s3",
-            config=Config(region_name=aws_region),
-            **self.s3_default,
-        )
+                "s3",
+                config=Config(region_name=region or AWS_REGION),
+                **effective,
+            )
         else:
             self.s3_client = boto3.client(
                 "s3",
@@ -96,12 +132,12 @@ class S3Service(AbstractStorageService):
         max_file_size_mb: int = 500,
         use_hash: bool = False,
         prefix: str = "",
-    ) -> list[str]:
+    ) -> list[DiscoveredObject]:
         bucket_name = container_name
         ingested_set = set(ingested_paths)
 
         seen_identifiers: set[str] = set()
-        discovered_paths: list[str] = []
+        discovered: list[DiscoveredObject] = []
 
         paginator = self.s3_client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
@@ -142,14 +178,20 @@ class S3Service(AbstractStorageService):
                             continue
                         seen_identifiers.add(file_identifier)
 
-                    discovered_paths.append(s3_path)
+                    discovered.append(DiscoveredObject(
+                        path=s3_path,
+                        file_size=file_size,
+                        source_modified_at=last_modified,
+                        content_hash=obj.get("ETag", "").strip('"'),
+                        mime_type=mimetypes.guess_type(object_key)[0],
+                    ))
 
                 except botocore.exceptions.BotoCoreError:
                     continue
                 except Exception:
                     continue
 
-        return discovered_paths
+        return discovered
 
     def get_file(self, container:str, key: str):
         response = self.s3_client.get_object(Bucket=container, Key=key)
@@ -179,6 +221,28 @@ class S3Service(AbstractStorageService):
         fp.seek(0)
         return fp
 
+    def list_objects_with_delimiter(
+        self,
+        container: str,
+        prefix: str = "",
+        delimiter: str = "/",
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"common_prefixes": [], "contents": []}
+        paginator = self.s3_client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(
+            Bucket=container, Prefix=prefix, Delimiter=delimiter
+        ):
+            for cp in page.get("CommonPrefixes", []):
+                result["common_prefixes"].append(cp["Prefix"])
+            for obj in page.get("Contents", []):
+                result["contents"].append({
+                    "key": obj["Key"],
+                    "size": obj["Size"],
+                    "last_modified": obj["LastModified"],
+                    "etag": obj.get("ETag", "").strip('"'),
+                })
+        return result
+
 
 class AzureBlobService(AbstractStorageService):
 
@@ -197,10 +261,10 @@ class AzureBlobService(AbstractStorageService):
         max_file_size_mb: int = 500,
         use_hash: bool = False,
         prefix: str = "",
-    ) -> list[str]:
+    ) -> list[DiscoveredObject]:
         ingested_set = set(ingested_paths)
         seen_identifiers: set[str] = set()
-        discovered_paths: list[str] = []
+        discovered: list[DiscoveredObject] = []
 
         container_client = self.blob_service_client.get_container_client(container)
 
@@ -222,6 +286,7 @@ class AzureBlobService(AbstractStorageService):
                 continue
 
             try:
+                content_hash = None
                 if use_hash:
                     hasher = hashlib.sha256()
                     downloader = container_client.download_blob(blob.name)
@@ -231,13 +296,25 @@ class AzureBlobService(AbstractStorageService):
                     if file_identifier in seen_identifiers:
                         continue
                     seen_identifiers.add(file_identifier)
+                    content_hash = file_identifier
+                else:
+                    if blob.content_settings and getattr(blob.content_settings, "content_md5", None):
+                        content_hash = blob.content_settings.content_md5.hex()
+                    elif blob.etag:
+                        content_hash = blob.etag.strip('"')
 
-                discovered_paths.append(blob_path)
+                discovered.append(DiscoveredObject(
+                    path=blob_path,
+                    file_size=blob_size,
+                    source_modified_at=blob_ts,
+                    content_hash=content_hash,
+                    mime_type=mimetypes.guess_type(blob.name)[0],
+                ))
 
             except Exception:
                 continue
 
-        return discovered_paths
+        return discovered
 
     def get_file(self, container:str, key: str):
         blob_client = self.blob_service_client.get_blob_client(container=container, blob=key)
@@ -274,3 +351,170 @@ class AzureBlobService(AbstractStorageService):
         fp.write(data.readall())
         fp.seek(0)
         return fp
+
+    def list_objects_with_delimiter(
+        self,
+        container: str,
+        prefix: str = "",
+        delimiter: str = "/",
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"common_prefixes": [], "contents": []}
+        container_client = self.blob_service_client.get_container_client(container)
+        for item in container_client.walk_blobs(
+            name_starts_with=prefix, delimiter=delimiter
+        ):
+            if hasattr(item, "prefix"):
+                result["common_prefixes"].append(item.prefix)
+            else:
+                content_md5 = None
+                if item.content_settings and getattr(item.content_settings, "content_md5", None):
+                    content_md5 = item.content_settings.content_md5.hex()
+                result["contents"].append({
+                    "key": item.name,
+                    "size": item.size or 0,
+                    "last_modified": item.last_modified,
+                    "etag": content_md5,
+                })
+        return result
+
+
+class GCSService(AbstractStorageService):
+    """Google Cloud Storage provider."""
+
+    def __init__(self, service_account_json=None):
+        if gcs_storage is None:
+            raise ImportError(
+                "google-cloud-storage is required for GCS support. "
+                "Install with: pip install google-cloud-storage"
+            )
+        if service_account_json:
+            if isinstance(service_account_json, str):
+                info = json.loads(service_account_json)
+            else:
+                info = service_account_json
+            self.gcs_client = gcs_storage.Client.from_service_account_info(info)
+        else:
+            self.gcs_client = gcs_storage.Client()
+
+    def get_file(self, container: str, key: str):
+        bucket = self.gcs_client.bucket(container)
+        blob = bucket.blob(key)
+        return blob.download_as_bytes()
+
+    def upload_file(self, data, container: str, key: str):
+        bucket = self.gcs_client.bucket(container)
+        blob = bucket.blob(key)
+        blob.upload_from_filename(data)
+
+    def delete_file(self, container: str, key: str):
+        bucket = self.gcs_client.bucket(container)
+        blob = bucket.blob(key)
+        blob.delete()
+
+    def dowload_file(self, container: str, download_location: str, path_prefix: str = ""):
+        blobs = self.gcs_client.list_blobs(container, prefix=path_prefix)
+        for blob in blobs:
+            rel_path = os.path.relpath(blob.name, start=path_prefix)
+            local_path = os.path.join(download_location, rel_path)
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            blob.download_to_filename(local_path)
+
+    def upload_bites_file(self, data, container: str, key: str):
+        bucket = self.gcs_client.bucket(container)
+        blob = bucket.blob(key)
+        blob.upload_from_file(data)
+
+    def download_bites_file(self, container: str, key: str):
+        bucket = self.gcs_client.bucket(container)
+        blob = bucket.blob(key)
+        fp = tempfile.TemporaryFile()
+        blob.download_to_file(fp)
+        fp.seek(0)
+        return fp
+
+    async def files_discovery(
+        self,
+        container_name: str,
+        ingested_paths: Iterable[str],
+        latest_created_at: int,
+        max_file_size_mb: int = 500,
+        use_hash: bool = False,
+        prefix: str = "",
+    ) -> list[DiscoveredObject]:
+        ingested_set = set(ingested_paths)
+        seen_identifiers: set[str] = set()
+        discovered: list[DiscoveredObject] = []
+
+        blobs = self.gcs_client.list_blobs(container_name, prefix=prefix)
+
+        for blob in blobs:
+            if blob.name.endswith("/") and (blob.size or 0) == 0:
+                continue
+
+            gcs_path = f"gcs://{container_name}/{blob.name}"
+
+            if gcs_path in ingested_set:
+                continue
+
+            if not blob.updated:
+                continue
+
+            blob_ts = int(blob.updated.timestamp())
+            if blob_ts <= latest_created_at:
+                continue
+
+            blob_size = blob.size or 0
+            if blob_size > max_file_size_mb * 1024 * 1024:
+                continue
+
+            try:
+                content_hash = None
+                if use_hash:
+                    hasher = hashlib.sha256()
+                    data = blob.download_as_bytes()
+                    hasher.update(data)
+                    file_identifier = hasher.hexdigest()
+
+                    if file_identifier in seen_identifiers:
+                        continue
+                    seen_identifiers.add(file_identifier)
+                    content_hash = file_identifier
+                else:
+                    if blob.md5_hash:
+                        content_hash = blob.md5_hash
+                    elif blob.crc32c:
+                        content_hash = blob.crc32c
+
+                discovered.append(DiscoveredObject(
+                    path=gcs_path,
+                    file_size=blob_size,
+                    source_modified_at=blob_ts,
+                    content_hash=content_hash,
+                    mime_type=mimetypes.guess_type(blob.name)[0],
+                ))
+
+            except Exception:
+                continue
+
+        return discovered
+
+    def list_objects_with_delimiter(
+        self,
+        container: str,
+        prefix: str = "",
+        delimiter: str = "/",
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"common_prefixes": [], "contents": []}
+        blobs_iterator = self.gcs_client.list_blobs(
+            container, prefix=prefix, delimiter=delimiter
+        )
+        for blob in blobs_iterator:
+            result["contents"].append({
+                "key": blob.name,
+                "size": blob.size or 0,
+                "last_modified": blob.updated,
+                "etag": blob.md5_hash or blob.crc32c,
+            })
+        # prefixes are available on the iterator after consumption
+        result["common_prefixes"] = list(blobs_iterator.prefixes)
+        return result
