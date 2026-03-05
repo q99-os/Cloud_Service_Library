@@ -14,13 +14,9 @@ import boto3
 import botocore
 from botocore.config import Config
 from azure.storage.blob import BlobServiceClient
+from google.cloud import storage as gcs_storage
 
-try:
-    from google.cloud import storage as gcs_storage
-except ImportError:
-    gcs_storage = None
-
-from cloud_services.env_vars import AWS_KEY, AWS_REGION, AWS_SECRET, AWS_URL, CONECTION_STRING
+from cloud_services.env_vars import AWS_KEY, AWS_REGION, AWS_SECRET, AWS_URL, CONNECTION_STRING, GCS_SERVICE_ACCOUNT_JSON
 
 
 @dataclass
@@ -88,13 +84,13 @@ class AbstractStorageService(ABC):
 
 
 class S3Service(AbstractStorageService):
-    s3_default = {
-        "aws_access_key_id": AWS_KEY,
-        "aws_secret_access_key": AWS_SECRET,
-        "endpoint_url": AWS_URL,
-    }
 
     def __init__(self, aws_key=None, aws_secret=None, aws_url=None, aws_region=None):
+        s3_default = {
+            "aws_access_key_id": AWS_KEY,
+            "aws_secret_access_key": AWS_SECRET,
+            "endpoint_url": AWS_URL,
+        }
 
         s3_provided_keys = {
             "aws_access_key_id": aws_key,
@@ -107,7 +103,7 @@ class S3Service(AbstractStorageService):
 
         if any_provided:
             region = s3_provided_keys.pop("region")
-            effective = {**self.s3_default}
+            effective = {**s3_default}
             for k, v in s3_provided_keys.items():
                 if v is not None:
                     effective[k] = v
@@ -120,7 +116,7 @@ class S3Service(AbstractStorageService):
             self.s3_client = boto3.client(
                 "s3",
                 config=Config(region_name=AWS_REGION),
-                **self.s3_default,
+                **s3_default,
             )
         self.s3_client.list_buckets()
 
@@ -246,10 +242,10 @@ class S3Service(AbstractStorageService):
 
 class AzureBlobService(AbstractStorageService):
 
-    connection_string = CONECTION_STRING
+    connection_string = CONNECTION_STRING
 
     def __init__(self, connection_string = None):
-        string = connection_string if connection_string else CONECTION_STRING
+        string = connection_string if connection_string else CONNECTION_STRING
         self.blob_service_client = BlobServiceClient.from_connection_string(string)
         self.blob_service_client.get_account_information()
 
@@ -382,16 +378,12 @@ class GCSService(AbstractStorageService):
     """Google Cloud Storage provider."""
 
     def __init__(self, service_account_json=None):
-        if gcs_storage is None:
-            raise ImportError(
-                "google-cloud-storage is required for GCS support. "
-                "Install with: pip install google-cloud-storage"
-            )
-        if service_account_json:
-            if isinstance(service_account_json, str):
-                info = json.loads(service_account_json)
+        effective_json = service_account_json if service_account_json else GCS_SERVICE_ACCOUNT_JSON
+        if effective_json:
+            if isinstance(effective_json, str):
+                info = json.loads(effective_json)
             else:
-                info = service_account_json
+                info = effective_json
             self.gcs_client = gcs_storage.Client.from_service_account_info(info)
         else:
             self.gcs_client = gcs_storage.Client()
