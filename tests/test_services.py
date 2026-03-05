@@ -1,8 +1,9 @@
 
 from datetime import UTC, datetime
+import asyncio
 from cloud_services import get_cloud_service
 from cloud_services.logs_providers import CloudWachService
-from cloud_services.storage_providers import S3Service
+from cloud_services.storage_providers import S3Service, DiscoveredObject
 from moto import mock_aws
 import os
 
@@ -96,5 +97,104 @@ def test_aws_logging_service():
     response = cloudwach_provider.logs_client.get_log_events(logGroupName="log_group", logStreamName="logstream")
     assert len(response['events']) == 1
     assert response['events'][0]['message'] == 'test log'
+
+    mock.stop()
+
+
+def test_s3_list_objects_with_delimiter():
+    mock = mock_aws()
+    mock.start()
+
+    s3_provider: S3Service = get_cloud_service("aws", "storage")
+    bucket = "delimiter-test-bucket"
+    s3_provider.s3_client.create_bucket(Bucket=bucket)
+
+    # Create objects in a folder structure
+    s3_provider.s3_client.put_object(Bucket=bucket, Key="folder1/a.txt", Body=b"a")
+    s3_provider.s3_client.put_object(Bucket=bucket, Key="folder1/b.txt", Body=b"b")
+    s3_provider.s3_client.put_object(Bucket=bucket, Key="folder2/c.txt", Body=b"c")
+    s3_provider.s3_client.put_object(Bucket=bucket, Key="root.txt", Body=b"root")
+
+    # List root with delimiter
+    result = s3_provider.list_objects_with_delimiter(container=bucket, prefix="", delimiter="/")
+    prefixes = sorted(result["common_prefixes"])
+    assert prefixes == ["folder1/", "folder2/"]
+    assert len(result["contents"]) == 1
+    assert result["contents"][0]["key"] == "root.txt"
+
+    # List folder1/ with delimiter
+    result2 = s3_provider.list_objects_with_delimiter(container=bucket, prefix="folder1/", delimiter="/")
+    assert result2["common_prefixes"] == []
+    assert len(result2["contents"]) == 2
+    keys = sorted(c["key"] for c in result2["contents"])
+    assert keys == ["folder1/a.txt", "folder1/b.txt"]
+
+    mock.stop()
+
+
+def test_s3_files_discovery_returns_discovered_objects():
+    mock = mock_aws()
+    mock.start()
+
+    s3_provider: S3Service = get_cloud_service("aws", "storage")
+    bucket = "discovery-test-bucket"
+    s3_provider.s3_client.create_bucket(Bucket=bucket)
+
+    s3_provider.s3_client.put_object(Bucket=bucket, Key="doc.pdf", Body=b"x" * 100)
+    s3_provider.s3_client.put_object(Bucket=bucket, Key="data.csv", Body=b"y" * 50)
+    s3_provider.s3_client.put_object(Bucket=bucket, Key="image.png", Body=b"z" * 200)
+
+    discovered = asyncio.get_event_loop().run_until_complete(
+        s3_provider.files_discovery(
+            container_name=bucket,
+            ingested_paths=[],
+            latest_created_at=0,
+        )
+    )
+
+    assert len(discovered) == 3
+    assert all(isinstance(obj, DiscoveredObject) for obj in discovered)
+
+    by_path = {obj.path: obj for obj in discovered}
+
+    pdf = by_path[f"s3://{bucket}/doc.pdf"]
+    assert pdf.file_size == 100
+    assert pdf.source_modified_at > 0
+    assert pdf.content_hash is not None
+    assert pdf.mime_type == "application/pdf"
+
+    csv_obj = by_path[f"s3://{bucket}/data.csv"]
+    assert csv_obj.file_size == 50
+    assert csv_obj.mime_type == "text/csv"
+
+    mock.stop()
+
+
+def test_s3_custom_credentials():
+    mock = mock_aws()
+    mock.start()
+
+    s3_provider: S3Service = get_cloud_service(
+        "aws", "storage",
+        aws_key="custom-key",
+        aws_secret="custom-secret",
+    )
+    # Should successfully create a client with custom credentials
+    assert s3_provider.s3_client is not None
+    s3_provider.s3_client.create_bucket(Bucket="custom-bucket")
+    s3_provider.s3_client.put_object(Bucket="custom-bucket", Key="test.txt", Body=b"hello")
+    result = s3_provider.get_file(container="custom-bucket", key="test.txt")
+    assert result.read() == b"hello"
+
+    mock.stop()
+
+
+def test_factory_kwargs_passthrough():
+    """Factory passes kwargs to service constructors."""
+    mock = mock_aws()
+    mock.start()
+
+    s3 = get_cloud_service("aws", "storage", aws_key="k", aws_secret="s")
+    assert isinstance(s3, S3Service)
 
     mock.stop()

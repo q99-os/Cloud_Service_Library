@@ -1,9 +1,9 @@
 
 from cloud_services.logs_providers import CloudWachService
-from cloud_services.storage_providers import AzureBlobService, S3Service
+from cloud_services.storage_providers import AzureBlobService, S3Service, GCSService
 
 
-def get_cloud_service(cloud, service):
+def get_cloud_service(cloud, service, **kwargs):
     providers = {
         "aws":{
             "storage": S3Service,
@@ -12,8 +12,10 @@ def get_cloud_service(cloud, service):
         "azure":{
             "storage": AzureBlobService
         },
-        "gcp":{}
+        "gcp":{
+            "storage": GCSService
+        }
     }
-    
-    
-    return providers[cloud][service]()
+
+
+    return providers[cloud][service](**kwargs)
