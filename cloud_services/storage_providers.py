@@ -28,6 +28,24 @@ class DiscoveredObject:
     mime_type: Optional[str] = None
 
 
+@dataclass
+class FolderNode:
+    """Lightweight tree node returned by list_tree."""
+    name: str
+    path: str
+    children: list[FolderNode] = None
+    has_children: bool = False
+    file_count: int = 0
+
+    def __post_init__(self):
+        if self.children is None:
+            self.children = []
+
+
+MAX_TREE_DEPTH = 20
+MAX_TREE_NODES = 5000
+
+
 class AbstractStorageService(ABC):
 
     @abstractmethod
@@ -81,6 +99,108 @@ class AbstractStorageService(ABC):
                                              keys: "key", "size", "last_modified"
         """
         ...
+
+    # ── Tree browsing (concrete — delegates to list_objects_with_delimiter) ──
+
+    def list_tree(
+        self,
+        container: str,
+        prefixes: list[str] | None = None,
+        max_depth: int = 1,
+    ) -> tuple[list[FolderNode], bool]:
+        """Build a folder tree via BFS over list_objects_with_delimiter.
+
+        Args:
+            container: bucket / container name.
+            prefixes: starting prefixes to expand.  Defaults to ``[""]`` (root).
+            max_depth: how many levels to expand (1 = immediate children only).
+                0 means unlimited (bounded by MAX_TREE_DEPTH / MAX_TREE_NODES).
+
+        Returns:
+            (nodes, truncated) — *truncated* is True if any limit was hit.
+        """
+        from collections import deque
+
+        start_prefixes = prefixes or [""]
+        effective_depth = max_depth if max_depth > 0 else MAX_TREE_DEPTH
+        node_count = 0
+        truncated = False
+        all_roots: list[FolderNode] = []
+
+        for start_prefix in start_prefixes:
+            normalized = start_prefix.rstrip("/")
+            if normalized:
+                normalized += "/"
+
+            root_children: list[FolderNode] = []
+            queue: deque[tuple[str, int, list, FolderNode | None]] = deque()
+            queue.append((normalized, 0, root_children, None))
+
+            while queue:
+                prefix, depth, parent_list, owning_node = queue.popleft()
+
+                if depth >= effective_depth or depth >= MAX_TREE_DEPTH or node_count >= MAX_TREE_NODES:
+                    truncated = True
+                    continue
+
+                try:
+                    result = self.list_objects_with_delimiter(
+                        container=container, prefix=prefix, delimiter="/",
+                    )
+                except Exception:
+                    continue
+
+                child_prefixes = sorted(
+                    p.rstrip("/") for p in result.get("common_prefixes", [])
+                )
+                file_count = len(
+                    result.get("contents") or result.get("objects") or []
+                )
+                if owning_node is not None:
+                    owning_node.file_count = file_count
+
+                at_boundary = (depth + 1 >= effective_depth)
+
+                for cp in child_prefixes:
+                    if node_count >= MAX_TREE_NODES:
+                        truncated = True
+                        break
+
+                    name = cp.rsplit("/", 1)[-1] if "/" in cp else cp
+                    node = FolderNode(
+                        name=name,
+                        path=cp + "/",
+                        has_children=at_boundary,
+                    )
+                    parent_list.append(node)
+                    node_count += 1
+                    if not at_boundary:
+                        queue.append((cp + "/", depth + 1, node.children, node))
+
+            all_roots.extend(root_children)
+
+        if truncated and not max_depth:
+            self._mark_truncated_leaves(container, all_roots)
+
+        return all_roots, truncated
+
+    def _mark_truncated_leaves(self, container: str, nodes: list[FolderNode]) -> None:
+        """Set has_children=True on leaf nodes that may have unexpanded subprefixes."""
+        for node in nodes:
+            if node.children:
+                self._mark_truncated_leaves(container, node.children)
+            else:
+                try:
+                    result = self.list_objects_with_delimiter(
+                        container=container, prefix=node.path, delimiter="/",
+                    )
+                    sub_prefixes = result.get("common_prefixes", [])
+                    file_count = len(result.get("contents") or result.get("objects") or [])
+                    node.file_count = file_count
+                    if sub_prefixes:
+                        node.has_children = True
+                except Exception:
+                    pass
 
 
 class S3Service(AbstractStorageService):
