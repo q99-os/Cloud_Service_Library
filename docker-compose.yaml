@@ -1,20 +1,18 @@
-version: "3.3"
+# Dev/debug container: `docker compose up -d`, then attach VS Code
+# (Dev Containers: Attach to Running Container). Source is bind-mounted,
+# so edits on the host are live inside the container.
 services:
-  cloud_provider:
+  cloud_services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "8008:80"
     volumes:
       - ./cloud_services:/code/cloud_services
       - ./tests:/code/tests
-      - ./setup.py:/code/setup.py
-      - ./cloud_services.egg-info:/code/cloud_services.egg-info
-      - ./dist:/code/dist
-#      - ./build:/code/build
-    stdin_open: true  
-    tty: true  
+      - ./pyproject.toml:/code/pyproject.toml
+      - ./uv.lock:/code/uv.lock
+    stdin_open: true
+    tty: true
     environment:
       - AWS_KEY=aws_key
       - AWS_SECRET=aws_secret

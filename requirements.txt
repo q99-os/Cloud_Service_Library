@@ -1,7 +1,0 @@
-wheel
-setuptools
-twine
-pytest
-pytest-runner
-boto3
-moto[s3,logs]

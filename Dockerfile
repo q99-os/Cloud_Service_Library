@@ -1,21 +1,18 @@
-# 
-FROM python:3.11
+FROM python:3.12-slim
 
-# 
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
 WORKDIR /code
 
-#
-RUN pwd
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PATH="/code/.venv/bin:$PATH"
 
-# 
-COPY ./requirements.txt /code/requirements.txt
+# Install locked dependencies (incl. dev group for in-container test/debug)
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project
 
-# 
-RUN pip install --upgrade -r /code/requirements.txt
+COPY cloud_services ./cloud_services
+COPY tests ./tests
 
-COPY ./cloud_services /code/cloud_services
-COPY ./tests /code/tests
-COPY ./setup.py /code/setup.py
-COPY ./cloud_services.egg-info /code/cloud_services.egg-info
-COPY ./dist /code/dist
-#COPY ./build /code/build
+RUN uv sync --frozen
