@@ -205,7 +205,7 @@ class AbstractStorageService(ABC):
 
 class S3Service(AbstractStorageService):
 
-    def __init__(self, aws_key=None, aws_secret=None, aws_url=None, aws_region=None):
+    def __init__(self, aws_key=None, aws_secret=None, aws_url=None, aws_region=None, bucket=None):
         s3_default = {
             "aws_access_key_id": AWS_KEY,
             "aws_secret_access_key": AWS_SECRET,
@@ -238,7 +238,8 @@ class S3Service(AbstractStorageService):
                 config=Config(region_name=AWS_REGION),
                 **s3_default,
             )
-        self.s3_client.list_buckets()
+        if bucket:
+            self.s3_client.head_bucket(Bucket=bucket)
 
     async def files_discovery(
         self,
@@ -364,10 +365,14 @@ class AzureBlobService(AbstractStorageService):
 
     connection_string = CONNECTION_STRING
 
-    def __init__(self, connection_string = None):
+    def __init__(self, connection_string = None, bucket=None):
         string = connection_string if connection_string else CONNECTION_STRING
         self.blob_service_client = BlobServiceClient.from_connection_string(string)
-        self.blob_service_client.get_account_information()
+        if bucket:
+            # Container-scoped credential/connectivity check
+            self.blob_service_client.get_container_client(bucket).get_container_properties()
+        else:
+            self.blob_service_client.get_account_information()
 
     async def files_discovery(
         self,
@@ -497,7 +502,7 @@ class AzureBlobService(AbstractStorageService):
 class GCSService(AbstractStorageService):
     """Google Cloud Storage provider."""
 
-    def __init__(self, service_account_json=None):
+    def __init__(self, service_account_json=None, bucket=None):
         effective_json = service_account_json if service_account_json else GCS_SERVICE_ACCOUNT_JSON
         if effective_json:
             if isinstance(effective_json, str):
@@ -507,6 +512,10 @@ class GCSService(AbstractStorageService):
             self.gcs_client = gcs_storage.Client.from_service_account_info(info)
         else:
             self.gcs_client = gcs_storage.Client()
+        if bucket:
+            # Bucket-scoped credential/connectivity check; needs only
+            # storage.objects.list, not storage.buckets.get.
+            next(iter(self.gcs_client.list_blobs(bucket, max_results=1)), None)
 
     def get_file(self, container: str, key: str):
         bucket = self.gcs_client.bucket(container)
