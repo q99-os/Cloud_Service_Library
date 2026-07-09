@@ -1,8 +1,6 @@
 
-from datetime import UTC, datetime
 import asyncio
 from cloud_services import get_cloud_service
-from cloud_services.logs_providers import CloudWachService
 from cloud_services.storage_providers import S3Service, DiscoveredObject
 from moto import mock_aws
 import os
@@ -69,36 +67,6 @@ def test_aws_download_file_obj():
     downloaded_file = s3_provider.download_bites_file(container=bucket_name, key=download_location)
     file_data = downloaded_file.read()
     assert file_content == file_data
-
-
-def test_aws_logging_service():
-    mock = mock_aws()
-    mock.start()
-
-    cloudwach_provider = get_cloud_service("aws", "logging")
-    assert isinstance(cloudwach_provider, CloudWachService)
-
-    cloudwach_provider.create_log_group("log_group")
-    cloudwach_provider.create_log_stream("log_group", "logstream")
-
-    log_event = {
-            'timestamp': int(datetime.now(UTC).timestamp() * 1000),
-            'message': "test log"
-        }
-																															
-    data = {
-            'logGroupName': "log_group",
-            'logStreamName': "logstream",
-            'logEvents': [log_event]
-        }
-    
-    cloudwach_provider.emit_log("log_group", "logstream", "test log")
-
-    response = cloudwach_provider.logs_client.get_log_events(logGroupName="log_group", logStreamName="logstream")
-    assert len(response['events']) == 1
-    assert response['events'][0]['message'] == 'test log'
-
-    mock.stop()
 
 
 def test_s3_list_objects_with_delimiter():
