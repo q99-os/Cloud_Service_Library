@@ -23,7 +23,7 @@ def test_aws_download_file():
 
     s3_provider = get_cloud_service("aws", "storage")
     s3_provider.s3_client.create_bucket(Bucket='my_bucket')
-    s3_provider.upload_file(data=file_path,bucket_name="my_bucket",file_path="my_bucket/test.txt")
+    s3_provider.upload_file(data=file_path,container="my_bucket",key="my_bucket/test.txt")
     s3_provider.dowload_file("my_bucket", "../texts")
 
     assert os.path.exists("../texts/my_bucket/test.txt")
@@ -44,9 +44,9 @@ def test_aws_storage_service():
     with open(file_path, 'w+') as f:
         f.write('test content')
     
-    s3_provider.upload_file(data=file_path,bucket_name="my_bucket",file_path="my_bucket/test.txt")
+    s3_provider.upload_file(data=file_path,container="my_bucket",key="my_bucket/test.txt")
 
-    test_file = s3_provider.get_file(bucket_name="my_bucket",file_path="my_bucket/test.txt")
+    test_file = s3_provider.get_file(container="my_bucket",key="my_bucket/test.txt")
 
     assert test_file.read().decode('utf-8') == "test content"
 
@@ -66,7 +66,7 @@ def test_aws_download_file_obj():
     s3_provider.s3_client.create_bucket(Bucket=bucket_name)
     s3_provider.s3_client.put_object(Bucket=bucket_name, Key=download_location, Body=file_content)
 
-    downloaded_file = s3_provider.download_bites_file(bucket_name=bucket_name, file_location=download_location)
+    downloaded_file = s3_provider.download_bites_file(container=bucket_name, key=download_location)
     file_data = downloaded_file.read()
     assert file_content == file_data
 
@@ -144,7 +144,7 @@ def test_s3_files_discovery_returns_discovered_objects():
     s3_provider.s3_client.put_object(Bucket=bucket, Key="data.csv", Body=b"y" * 50)
     s3_provider.s3_client.put_object(Bucket=bucket, Key="image.png", Body=b"z" * 200)
 
-    discovered = asyncio.get_event_loop().run_until_complete(
+    discovered = asyncio.run(
         s3_provider.files_discovery(
             container_name=bucket,
             ingested_paths=[],
